@@ -84,6 +84,18 @@ def prepare_seed(seed):
     seed = u''.join([seed[i] for i in range(len(seed)) if not (seed[i] in string.whitespace and is_CJK(seed[i-1]) and is_CJK(seed[i+1]))])
     return seed
 
+def get_entropy(n):
+    entropy = bytearray()
+    try:
+        entropy.extend(open("/dev/random", "rb").read(n))
+    except exception:
+        print "W: Unable to read /dev/random. Falling back to sys.urandom"
+        return sys.urandom(n)
+    entropy = bytes(entropy)
+    if len(entropy) != n:
+        raise OSError("Unable to get sufficient entropy")
+    return entropy
+
 
 filenames = {
     'en':'english.txt',
@@ -153,7 +165,7 @@ class Mnemonic(object):
         # we add at least 16 bits
         n_added = max(16, k + num_bits - n)
         print_error("make_seed", prefix, "adding %d bits"%n_added)
-        my_entropy = ecdsa.util.randrange( pow(2, n_added) )
+        my_entropy = ecdsa.util.randrange( pow(2, n_added), get_entropy)
         nonce = 0
         while True:
             nonce += 1
