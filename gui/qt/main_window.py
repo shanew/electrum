@@ -16,11 +16,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-import sys, time, datetime, re, threading
+import sys, time, re, threading
 from electrum.i18n import _, set_language
 from electrum.util import print_error, print_msg
 import os.path, json, ast, traceback
-import webbrowser
 import shutil
 import StringIO
 
@@ -35,7 +34,7 @@ from electrum.plugins import run_hook
 
 import icons_rc
 
-from electrum.util import format_satoshis, NotEnoughFunds
+from electrum.util import format_satoshis, format_time, NotEnoughFunds
 from electrum import Transaction
 from electrum import mnemonic
 from electrum import util, bitcoin, commands, Interface, Wallet
@@ -80,12 +79,6 @@ class StatusBarButton(QPushButton):
 
 
 
-default_column_widths = {
-    "history":[40,140,350,140],
-    "contacts":[350,330],
-    "receive": [370,200,130]
-}
-
 # status of payment requests
 PR_UNPAID  = 0
 PR_EXPIRED = 1
@@ -118,6 +111,7 @@ class ElectrumWindow(QMainWindow):
         self.tray = gui_object.tray
         self.go_lite = gui_object.go_lite
         self.lite = None
+        self.app = gui_object.app
 
         self.create_status_bar()
         self.need_update = threading.Event()
@@ -129,7 +123,6 @@ class ElectrumWindow(QMainWindow):
         self.completions = QStringListModel()
 
         self.tabs = tabs = QTabWidget(self)
-        self.column_widths = self.config.get("column_widths_2", default_column_widths )
         tabs.addTab(self.create_history_tab(), _('History') )
         tabs.addTab(self.create_send_tab(), _('Send') )
         tabs.addTab(self.create_receive_tab(), _('Receive') )
@@ -222,12 +215,12 @@ class ElectrumWindow(QMainWindow):
         self.notify_transactions()
         self.update_account_selector()
         # update menus
-        self.new_account_menu.setEnabled(self.wallet.can_create_accounts())
+        self.new_account_menu.setVisible(self.wallet.can_create_accounts())
         self.private_keys_menu.setEnabled(not self.wallet.is_watching_only())
         self.password_menu.setEnabled(self.wallet.can_change_password())
         self.seed_menu.setEnabled(self.wallet.has_seed())
         self.mpk_menu.setEnabled(self.wallet.is_deterministic())
-        self.import_menu.setEnabled(self.wallet.can_import())
+        self.import_menu.setVisible(self.wallet.can_import())
         self.export_menu.setEnabled(self.wallet.can_export())
 
         self.update_lock_icon()
@@ -274,22 +267,10 @@ class ElectrumWindow(QMainWindow):
             QMessageBox.warning(None, _('Warning'), str(e), _('OK'))
             return
         action = wallet.get_action()
-        # ask for confirmation
-        if action is not None:
-            if not self.question(_("This file contains an incompletely created wallet.\nDo you want to complete its creation now?")):
-                return
         self.hide()
         # run wizard
         if action is not None:
-            import installwizard
-            wizard = installwizard.InstallWizard(self.config, self.network, storage)
-            wizard.show()
-            try:
-                wallet = wizard.run(action)
-            except BaseException as e:
-                traceback.print_exc(file=sys.stdout)
-                QMessageBox.information(None, _('Error'), str(e), _('OK'))
-                return
+            wallet = self.gui_object.run_wizard(storage, action)
             if not wallet:
                 self.show()
                 return
@@ -300,8 +281,8 @@ class ElectrumWindow(QMainWindow):
         # load new wallet in gui
         self.load_wallet(wallet)
         # save path
-        self.config.set_key('gui_last_wallet', filename)
-
+        if self.config.get('wallet_path') is None:
+            self.config.set_key('gui_last_wallet', filename)
 
 
     def backup_wallet(self):
@@ -560,175 +541,25 @@ class ElectrumWindow(QMainWindow):
         self.update_completions()
         self.update_invoices_tab()
 
-
     def create_history_tab(self):
-        self.history_list = l = MyTreeWidget(self)
-        l.setColumnCount(5)
-        for i,width in enumerate(self.column_widths['history']):
-            l.setColumnWidth(i, width)
-        l.setHeaderLabels( [ '', _('Date'), _('Description') , _('Amount'), _('Balance')] )
-        l.itemDoubleClicked.connect(self.tx_label_clicked)
-        l.itemChanged.connect(self.tx_label_changed)
-        l.customContextMenuRequested.connect(self.create_history_menu)
+        from history_widget import HistoryWidget
+        self.history_list = l = HistoryWidget(self)
         return l
 
-
-    def create_history_menu(self, position):
-        self.history_list.selectedIndexes()
-        item = self.history_list.currentItem()
-        be = self.config.get('block_explorer', 'Blockchain.info')
-        if be == 'Blockchain.info':
-            block_explorer = 'https://blockchain.info/tx/'
-        elif be == 'Blockr.io':
-            block_explorer = 'https://blockr.io/tx/info/'
-        elif be == 'Insight.is':
-            block_explorer = 'http://live.insight.is/tx/'
-        elif be == "Blocktrail.com":
-            block_explorer = 'https://www.blocktrail.com/BTC/tx/'
-
-        if not item: return
-        tx_hash = str(item.data(0, Qt.UserRole).toString())
-        if not tx_hash: return
-        menu = QMenu()
-        menu.addAction(_("Copy ID to Clipboard"), lambda: self.app.clipboard().setText(tx_hash))
-        menu.addAction(_("Details"), lambda: self.show_transaction(self.wallet.transactions.get(tx_hash)))
-        menu.addAction(_("Edit description"), lambda: self.tx_label_clicked(item,2))
-        menu.addAction(_("View on block explorer"), lambda: webbrowser.open(block_explorer + tx_hash))
-        menu.exec_(self.contacts_list.viewport().mapToGlobal(position))
-
+    def show_address(self, addr):
+        import address_dialog
+        d = address_dialog.AddressDialog(addr, self)
+        d.exec_()
 
     def show_transaction(self, tx):
         import transaction_dialog
         d = transaction_dialog.TxDialog(tx, self)
         d.exec_()
 
-    def tx_label_clicked(self, item, column):
-        if column==2 and item.isSelected():
-            self.is_edit=True
-            item.setFlags(Qt.ItemIsEditable|Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-            self.history_list.editItem( item, column )
-            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-            self.is_edit=False
-
-    def tx_label_changed(self, item, column):
-        if self.is_edit:
-            return
-        self.is_edit=True
-        tx_hash = str(item.data(0, Qt.UserRole).toString())
-        tx = self.wallet.transactions.get(tx_hash)
-        text = unicode( item.text(2) )
-        self.wallet.set_label(tx_hash, text)
-        if text:
-            item.setForeground(2, QBrush(QColor('black')))
-        else:
-            text = self.wallet.get_default_label(tx_hash)
-            item.setText(2, text)
-            item.setForeground(2, QBrush(QColor('gray')))
-        self.is_edit=False
-
-
-    def edit_label(self, is_recv):
-        l = self.address_list if is_recv else self.contacts_list
-        item = l.currentItem()
-        item.setFlags(Qt.ItemIsEditable|Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-        l.editItem( item, 1 )
-        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-
-
-
-    def address_label_clicked(self, item, column, l, column_addr, column_label):
-        if column == column_label and item.isSelected():
-            is_editable = item.data(0, 32).toBool()
-            if not is_editable:
-                return
-            addr = unicode( item.text(column_addr) )
-            label = unicode( item.text(column_label) )
-            item.setFlags(Qt.ItemIsEditable|Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-            l.editItem( item, column )
-            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-
-
-    def address_label_changed(self, item, column, l, column_addr, column_label):
-        if column == column_label:
-            addr = unicode( item.text(column_addr) )
-            text = unicode( item.text(column_label) )
-            is_editable = item.data(0, 32).toBool()
-            if not is_editable:
-                return
-
-            changed = self.wallet.set_label(addr, text)
-            if changed:
-                self.update_history_tab()
-                self.update_completions()
-
-            self.current_item_changed(item)
-
-        run_hook('item_changed', item, column)
-
-
-    def current_item_changed(self, a):
-        run_hook('current_item_changed', a)
-
-
-    def format_time(self, timestamp):
-        try:
-            time_str = datetime.datetime.fromtimestamp( timestamp).isoformat(' ')[:-3]
-        except Exception:
-            time_str = _("error")
-        return time_str
-
-
     def update_history_tab(self):
-
-        self.history_list.clear()
-        for item in self.wallet.get_tx_history(self.current_account):
-            tx_hash, conf, is_mine, value, fee, balance, timestamp = item
-            time_str = _("unknown")
-            if conf > 0:
-                time_str = self.format_time(timestamp)
-            if conf == -1:
-                time_str = 'unverified'
-                icon = QIcon(":icons/unconfirmed.png")
-            elif conf == 0:
-                time_str = 'pending'
-                icon = QIcon(":icons/unconfirmed.png")
-            elif conf < 6:
-                icon = QIcon(":icons/clock%d.png"%conf)
-            else:
-                icon = QIcon(":icons/confirmed.png")
-
-            if value is not None:
-                v_str = self.format_amount(value, True, whitespaces=True)
-            else:
-                v_str = '--'
-
-            balance_str = self.format_amount(balance, whitespaces=True)
-
-            if tx_hash:
-                label, is_default_label = self.wallet.get_label(tx_hash)
-            else:
-                label = _('Pruned transaction outputs')
-                is_default_label = False
-
-            item = QTreeWidgetItem( [ '', time_str, label, v_str, balance_str] )
-            item.setFont(2, QFont(MONOSPACE_FONT))
-            item.setFont(3, QFont(MONOSPACE_FONT))
-            item.setFont(4, QFont(MONOSPACE_FONT))
-            if value < 0:
-                item.setForeground(3, QBrush(QColor("#BC1E1E")))
-            if tx_hash:
-                item.setData(0, Qt.UserRole, tx_hash)
-                item.setToolTip(0, "%d %s\nTxId:%s" % (conf, _('Confirmations'), tx_hash) )
-            if is_default_label:
-                item.setForeground(2, QBrush(QColor('grey')))
-
-            item.setIcon(0, icon)
-            self.history_list.insertTopLevelItem(0,item)
-
-
-        self.history_list.setCurrentItem(self.history_list.topLevelItem(0))
-        run_hook('history_tab_update')
-
+        domain = self.wallet.get_account_addresses(self.current_account)
+        h = self.wallet.get_history(domain)
+        self.history_list.update(h)
 
     def create_receive_tab(self):
         w = QWidget()
@@ -779,11 +610,9 @@ class ElectrumWindow(QMainWindow):
         grid.setRowStretch(6, 1)
 
         self.receive_requests_label = QLabel(_('Saved Requests'))
-        self.receive_list = MyTreeWidget(self)
-        self.receive_list.customContextMenuRequested.connect(self.receive_list_menu)
+        self.receive_list = MyTreeWidget(self, self.receive_list_menu, [_('Date'), _('Account'), _('Address'), _('Message'), _('Amount')], [])
         self.receive_list.currentItemChanged.connect(self.receive_item_changed)
         self.receive_list.itemClicked.connect(self.receive_item_changed)
-        self.receive_list.setHeaderLabels( [_('Date'), _('Account'), _('Address'), _('Message'), _('Amount')] )
         self.receive_list.setSortingEnabled(True)
         self.receive_list.setColumnWidth(0, 180)
         self.receive_list.hideColumn(1)     # the update will show it if necessary
@@ -929,7 +758,7 @@ class ElectrumWindow(QMainWindow):
             # only show requests for the current account
             if address not in domain:
                 continue
-            date = self.format_time(timestamp)
+            date = format_time(timestamp)
             account = self.wallet.get_account_name(self.wallet.get_account_from_address(address))
             item = QTreeWidgetItem( [ date, account, address, message, self.format_amount(amount) if amount else ""])
             item.setFont(2, QFont(MONOSPACE_FONT))
@@ -977,14 +806,9 @@ class ElectrumWindow(QMainWindow):
 
         self.from_label = QLabel(_('From'))
         grid.addWidget(self.from_label, 3, 0)
-        self.from_list = MyTreeWidget(self)
-        self.from_list.setColumnCount(2)
-        self.from_list.setColumnWidth(0, 350)
-        self.from_list.setColumnWidth(1, 50)
+        self.from_list = MyTreeWidget(self, self.from_list_menu, ['',''], [350, 50])
         self.from_list.setHeaderHidden(True)
         self.from_list.setMaximumHeight(80)
-        self.from_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.from_list.customContextMenuRequested.connect(self.from_list_menu)
         grid.addWidget(self.from_list, 3, 1, 1, 3)
         self.set_pay_from([])
 
@@ -1019,7 +843,7 @@ class ElectrumWindow(QMainWindow):
             for i in inputs: self.wallet.add_input_info(i)
             addr = self.payto_e.payto_address if self.payto_e.payto_address else self.dummy_address
             output = ('address', addr, sendable)
-            dummy_tx = Transaction(inputs, [output])
+            dummy_tx = Transaction.from_io(inputs, [output])
             fee = self.wallet.estimated_fee(dummy_tx)
             self.amount_e.setAmount(max(0,sendable-fee))
             self.amount_e.textEdited.emit("")
@@ -1106,12 +930,7 @@ class ElectrumWindow(QMainWindow):
             self.from_list.addTopLevelItem(QTreeWidgetItem( [format(item), self.format_amount(item['value']) ]))
 
     def update_completions(self):
-        l = []
-        for addr,label in self.wallet.labels.items():
-            if addr in self.wallet.addressbook:
-                l.append( label + '  <' + addr + '>')
-
-        run_hook('update_completions', l)
+        l = self.wallet.get_completions()
         self.completions.setStringList(l)
 
 
@@ -1381,84 +1200,32 @@ class ElectrumWindow(QMainWindow):
                 self.wallet.freeze(addr)
         self.update_address_tab()
 
-
-
-    def create_list_tab(self, headers):
-        "generic tab creation method"
-        l = MyTreeWidget(self)
-        l.setColumnCount( len(headers) )
-        l.setHeaderLabels( headers )
-
+    def create_list_tab(self, l):
         w = QWidget()
         vbox = QVBoxLayout()
         w.setLayout(vbox)
-
         vbox.setMargin(0)
         vbox.setSpacing(0)
         vbox.addWidget(l)
         buttons = QWidget()
         vbox.addWidget(buttons)
-
-        return l, w
-
+        return w
 
     def create_addresses_tab(self):
-        l, w = self.create_list_tab([ _('Address'), _('Label'), _('Balance'), _('Tx')])
-        for i,width in enumerate(self.column_widths['receive']):
-            l.setColumnWidth(i, width)
-        l.setContextMenuPolicy(Qt.CustomContextMenu)
-        l.customContextMenuRequested.connect(self.create_receive_menu)
+        l = MyTreeWidget(self, self.create_receive_menu, [ _('Address'), _('Label'), _('Balance'), _('Tx')], [370, None, 130])
         l.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        l.itemDoubleClicked.connect(lambda a, b: self.address_label_clicked(a,b,l,0,1))
-        l.itemChanged.connect(lambda a,b: self.address_label_changed(a,b,l,0,1))
-        l.currentItemChanged.connect(lambda a,b: self.current_item_changed(a))
         self.address_list = l
-        return w
-
-
-
-
-    def save_column_widths(self):
-        self.column_widths["receive"] = []
-        for i in range(self.address_list.columnCount() -1):
-            self.column_widths["receive"].append(self.address_list.columnWidth(i))
-
-        self.column_widths["history"] = []
-        for i in range(self.history_list.columnCount() - 1):
-            self.column_widths["history"].append(self.history_list.columnWidth(i))
-
-        self.column_widths["contacts"] = []
-        for i in range(self.contacts_list.columnCount() - 1):
-            self.column_widths["contacts"].append(self.contacts_list.columnWidth(i))
-
-        self.config.set_key("column_widths_2", self.column_widths, True)
-
+        return self.create_list_tab(l)
 
     def create_contacts_tab(self):
-        l, w = self.create_list_tab([_('Address'), _('Label'), _('Tx')])
-        l.setContextMenuPolicy(Qt.CustomContextMenu)
-        l.customContextMenuRequested.connect(self.create_contact_menu)
-        for i,width in enumerate(self.column_widths['contacts']):
-            l.setColumnWidth(i, width)
-        l.itemDoubleClicked.connect(lambda a, b: self.address_label_clicked(a,b,l,0,1))
-        l.itemChanged.connect(lambda a,b: self.address_label_changed(a,b,l,0,1))
+        l = MyTreeWidget(self, self.create_contact_menu, [_('Address'), _('Label'), _('Tx')], [350, None])
         self.contacts_list = l
-        return w
-
+        return self.create_list_tab(l)
 
     def create_invoices_tab(self):
-        l, w = self.create_list_tab([_('Date'), _('Requestor'), _('Memo'), _('Amount'), _('Status')])
-        l.setColumnWidth(0, 150)
-        l.setColumnWidth(1, 150)
-        l.setColumnWidth(3, 150)
-        l.setColumnWidth(4, 40)
-        h = l.header()
-        h.setStretchLastSection(False)
-        h.setResizeMode(2, QHeaderView.Stretch)
-        l.setContextMenuPolicy(Qt.CustomContextMenu)
-        l.customContextMenuRequested.connect(self.create_invoice_menu)
+        l = MyTreeWidget(self, self.create_invoice_menu, [_('Date'), _('Requestor'), _('Memo'), _('Amount'), _('Status')], [150, 150, None, 150, 40])
         self.invoices_list = l
-        return w
+        return self.create_list_tab(l)
 
     def update_invoices_tab(self):
         invoices = self.wallet.storage.get('invoices', {})
@@ -1468,12 +1235,12 @@ class ElectrumWindow(QMainWindow):
             domain, memo, amount, expiration_date, status, tx_hash = value
             if status == PR_UNPAID and expiration_date and expiration_date < time.time():
                 status = PR_EXPIRED
-            date_str = datetime.datetime.fromtimestamp(expiration_date).isoformat(' ')[:-3]
+            date_str = format_time(expiration_date)
             item = QTreeWidgetItem( [ date_str, domain, memo, self.format_amount(amount, whitespaces=True), ''] )
             icon = QIcon(pr_icons.get(status))
             item.setIcon(4, icon)
             item.setToolTip(4, pr_tooltips.get(status,''))
-            item.setData(0, 32, key)
+            item.setData(0, Qt.UserRole, key)
             item.setFont(1, QFont(MONOSPACE_FONT))
             item.setFont(3, QFont(MONOSPACE_FONT))
             l.addTopLevelItem(item)
@@ -1522,8 +1289,8 @@ class ElectrumWindow(QMainWindow):
         addrs = [unicode(item.text(0)) for item in selected]
         if not multi_select:
             item = self.address_list.itemAt(position)
-            if not item: return
-
+            if not item:
+                return
             addr = addrs[0]
             if not is_valid(addr):
                 k = str(item.data(0,32).toString())
@@ -1537,8 +1304,9 @@ class ElectrumWindow(QMainWindow):
         if not multi_select:
             menu.addAction(_("Copy to clipboard"), lambda: self.app.clipboard().setText(addr))
             menu.addAction(_("Request payment"), lambda: self.receive_at(addr))
-            menu.addAction(_("Edit label"), lambda: self.edit_label(True))
-            menu.addAction(_("Public keys"), lambda: self.show_public_keys(addr))
+            menu.addAction(_("Edit label"), lambda: self.address_list.edit_label(item))
+            menu.addAction(_('History'), lambda: self.show_address(addr))
+            menu.addAction(_('Public Keys'), lambda: self.show_public_keys(addr))
             if self.wallet.can_export():
                 menu.addAction(_("Private key"), lambda: self.show_private_key(addr))
             if not self.wallet.is_watching_only():
@@ -1612,7 +1380,7 @@ class ElectrumWindow(QMainWindow):
             menu.addAction(_("Pay to"), lambda: self.payto(payto_addr))
             menu.addAction(_("QR code"), lambda: self.show_qrcode("bitcoin:" + addr, _("Address")))
             if is_editable:
-                menu.addAction(_("Edit label"), lambda: self.edit_label(False))
+                menu.addAction(_("Edit label"), lambda: self.contacts_list.edit_label(item))
                 menu.addAction(_("Delete"), lambda: self.delete_contact(addr))
 
         run_hook('create_contact_menu', menu, item)
@@ -1673,31 +1441,24 @@ class ElectrumWindow(QMainWindow):
 
     def update_address_tab(self):
         l = self.address_list
-        # extend the syntax for consistency
-        l.addChild = l.addTopLevelItem
-        l.insertChild = l.insertTopLevelItem
-
+        item = l.currentItem()
+        current_address = item.data(0, Qt.UserRole).toString() if item else None
         l.clear()
-
         accounts = self.wallet.get_accounts()
         if self.current_account is None:
             account_items = sorted(accounts.items())
         else:
             account_items = [(self.current_account, accounts.get(self.current_account))]
-
-
         for k, account in account_items:
-
             if len(accounts) > 1:
                 name = self.wallet.get_account_name(k)
-                c,u = self.wallet.get_account_balance(k)
+                c, u = self.wallet.get_account_balance(k)
                 account_item = QTreeWidgetItem( [ name, '', self.format_amount(c+u), ''] )
                 l.addTopLevelItem(account_item)
                 account_item.setExpanded(self.accounts_expanded.get(k, True))
-                account_item.setData(0, 32, k)
+                account_item.setData(0, Qt.UserRole, k)
             else:
                 account_item = l
-
             sequences = [0,1] if account.has_change() else [0]
             for is_change in sequences:
                 if len(sequences) > 1:
@@ -1708,10 +1469,8 @@ class ElectrumWindow(QMainWindow):
                         seq_item.setExpanded(True)
                 else:
                     seq_item = account_item
-
                 used_item = QTreeWidgetItem( [ _("Used"), '', '', '', ''] )
                 used_flag = False
-
                 addr_list = account.get_addresses(is_change)
                 for address in addr_list:
                     num, is_used = self.wallet.is_used(address)
@@ -1720,7 +1479,8 @@ class ElectrumWindow(QMainWindow):
                     balance = self.format_amount(c + u)
                     item = QTreeWidgetItem( [ address, label, balance, "%d"%num] )
                     item.setFont(0, QFont(MONOSPACE_FONT))
-                    item.setData(0, 32, True) # label can be edited
+                    item.setData(0, Qt.UserRole, address)
+                    item.setData(0, Qt.UserRole+1, True) # label can be edited
                     if address in self.wallet.frozen_addresses:
                         item.setBackgroundColor(0, QColor('lightblue'))
                     if self.wallet.is_beyond_limit(address, account, is_change):
@@ -1732,28 +1492,26 @@ class ElectrumWindow(QMainWindow):
                         used_item.addChild(item)
                     else:
                         seq_item.addChild(item)
-
-        # we use column 1 because column 0 may be hidden
-        l.setCurrentItem(l.topLevelItem(0),1)
+                    if address == current_address:
+                        l.setCurrentItem(item)
 
 
     def update_contacts_tab(self):
         l = self.contacts_list
+        item = l.currentItem()
+        current_address = item.data(0, Qt.UserRole).toString() if item else None
         l.clear()
-
         for address in self.wallet.addressbook:
             label = self.wallet.labels.get(address,'')
             n = self.wallet.get_num_tx(address)
             item = QTreeWidgetItem( [ address, label, "%d"%n] )
             item.setFont(0, QFont(MONOSPACE_FONT))
-            # 32 = label can be edited (bool)
-            item.setData(0,32, True)
-            # 33 = payto string
-            item.setData(0,33, address)
+            item.setData(0, Qt.UserRole, address)
+            item.setData(0, Qt.UserRole+1, True)
             l.addTopLevelItem(item)
-
+            if address == current_address:
+                l.setCurrentItem(item)
         run_hook('update_contacts_tab', l)
-        l.setCurrentItem(l.topLevelItem(0))
 
 
     def create_console_tab(self):
@@ -1925,9 +1683,12 @@ class ElectrumWindow(QMainWindow):
             vbox.addWidget(gb)
             group = QButtonGroup()
             first_button = None
-            for name in sorted(mpk_dict.keys()):
+            for key in sorted(mpk_dict.keys()):
+                is_mine = self.wallet.master_private_keys.has_key(key)
                 b = QRadioButton(gb)
-                b.setText(name)
+                name = 'Self' if is_mine else 'Cosigner'
+                b.setText(name + ' (%s)'%key)
+                b.key = key
                 group.addButton(b)
                 vbox.addWidget(b)
                 if not first_button:
@@ -1938,8 +1699,7 @@ class ElectrumWindow(QMainWindow):
             vbox.addWidget(mpk_text)
 
             def show_mpk(b):
-                name = str(b.text())
-                mpk = mpk_dict.get(name, "")
+                mpk = mpk_dict.get(b.key, "")
                 mpk_text.setText(mpk)
 
             group.buttonReleased.connect(show_mpk)
@@ -1981,17 +1741,24 @@ class ElectrumWindow(QMainWindow):
 
     def do_protect(self, func, args):
         if self.wallet.use_encryption:
-            password = self.password_dialog()
-            if not password:
-                return
+            while True:
+                password = self.password_dialog()
+                if not password:
+                    return
+                try:
+                    self.wallet.check_password(password)
+                    break
+                except Exception as e:
+                    QMessageBox.warning(self, _('Error'), str(e), _('OK'))
+                    continue
         else:
             password = None
 
         if args != (False,):
             args = (self,) + args + (password,)
         else:
-            args = (self,password)
-        apply( func, args)
+            args = (self, password)
+        apply(func, args)
 
 
     def show_public_keys(self, address):
@@ -2214,7 +1981,7 @@ class ElectrumWindow(QMainWindow):
 
         if is_hex:
             try:
-                return Transaction.deserialize(txt)
+                return Transaction(txt)
             except:
                 traceback.print_exc(file=sys.stdout)
                 QMessageBox.critical(None, _("Unable to parse transaction"), _("Electrum was unable to parse your transaction"))
@@ -2223,7 +1990,7 @@ class ElectrumWindow(QMainWindow):
         try:
             tx_dict = json.loads(str(txt))
             assert "hex" in tx_dict.keys()
-            tx = Transaction.deserialize(tx_dict["hex"])
+            tx = Transaction(tx_dict["hex"])
             #if tx_dict.has_key("input_info"):
             #    input_info = json.loads(tx_dict['input_info'])
             #    tx.add_input_info(input_info)
@@ -2297,7 +2064,7 @@ class ElectrumWindow(QMainWindow):
         if ok and txid:
             r = self.network.synchronous_get([ ('blockchain.transaction.get',[str(txid)]) ])[0]
             if r:
-                tx = transaction.Transaction.deserialize(r)
+                tx = transaction.Transaction(r)
                 if tx:
                     self.show_transaction(tx)
                 else:
@@ -2500,17 +2267,13 @@ class ElectrumWindow(QMainWindow):
 
 
     def do_export_history(self, wallet, fileName, is_csv):
-        history = wallet.get_tx_history()
+        history = wallet.get_history()
         lines = []
         for item in history:
-            tx_hash, confirmations, is_mine, value, fee, balance, timestamp = item
+            tx_hash, confirmations, value, timestamp, balance = item
             if confirmations:
                 if timestamp is not None:
-                    try:
-                        time_string = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
-                    except [RuntimeError, TypeError, NameError] as reason:
-                        time_string = "unknown"
-                        pass
+                    time_string = format_time(timestamp)
                 else:
                     time_string = "unknown"
             else:
@@ -2521,27 +2284,21 @@ class ElectrumWindow(QMainWindow):
             else:
                 value_string = '--'
 
-            if fee is not None:
-                fee_string = format_satoshis(fee, True)
-            else:
-                fee_string = '0'
-
             if tx_hash:
                 label, is_default_label = wallet.get_label(tx_hash)
                 label = label.encode('utf-8')
             else:
                 label = ""
 
-            balance_string = format_satoshis(balance, False)
             if is_csv:
-                lines.append([tx_hash, label, confirmations, value_string, fee_string, balance_string, time_string])
+                lines.append([tx_hash, label, confirmations, value_string, time_string])
             else:
                 lines.append({'txid':tx_hash, 'date':"%16s"%time_string, 'label':label, 'value':value_string})
 
         with open(fileName, "w+") as f:
             if is_csv:
                 transaction = csv.writer(f, lineterminator='\n')
-                transaction.writerow(["transaction_hash","label", "confirmations", "value", "fee", "balance", "timestamp"])
+                transaction.writerow(["transaction_hash","label", "confirmations", "value", "timestamp"])
                 for line in lines:
                     transaction.writerow(line)
             else:
@@ -2803,7 +2560,6 @@ class ElectrumWindow(QMainWindow):
         if not self.isMaximized():
             g = self.geometry()
             self.config.set_key("winpos-qt", [g.left(),g.top(),g.width(),g.height()])
-        self.save_column_widths()
         self.config.set_key("console-history", self.console.history[-50:], True)
         self.wallet.storage.put('accounts_expanded', self.accounts_expanded)
         event.accept()

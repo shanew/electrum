@@ -110,7 +110,6 @@ def arg_parser():
     parser.add_option("-g", "--gui", dest="gui", help="User interface: qt, lite, gtk, text or stdio")
     parser.add_option("-w", "--wallet", dest="wallet_path", help="wallet path")
     parser.add_option("-o", "--offline", action="store_true", dest="offline", default=False, help="remain offline")
-    parser.add_option("-d", "--daemon", action="store_true", dest="daemon", default=False, help="use daemon")
     parser.add_option("-C", "--concealed", action="store_true", dest="concealed", default=False, help="don't echo seed to console when restoring")
     parser.add_option("-a", "--all", action="store_true", dest="show_all", default=False, help="show all addresses")
     parser.add_option("-l", "--labels", action="store_true", dest="show_labels", default=False, help="show the labels of listed addresses")
@@ -148,7 +147,10 @@ def run_command(cmd, password=None, args=None):
     if args is None:
         args = []  # Do not use mutables as default values!
     if cmd.requires_network and not options.offline:
-        s = get_daemon(config, True)
+        s = get_daemon(config, False)
+        if not s:
+            print_msg("Network daemon is not running. Try 'electrum daemon start'")
+            sys.exit(1)
         network = NetworkProxy(s, config)
         network.start()
         while network.is_connecting():
@@ -211,7 +213,7 @@ if __name__ == '__main__':
 
     set_verbosity(config_options.get('verbose'))
     config = SimpleConfig(config_options)
-    print_error("CA bundle:", requests.utils.DEFAULT_CA_BUNDLE_PATH, "found" if os.path.exists(requests.utils.DEFAULT_CA_BUNDLE_PATH) else "not found")
+    assert os.path.exists(requests.utils.DEFAULT_CA_BUNDLE_PATH)
 
     if len(args) == 0:
         url = None
@@ -238,7 +240,9 @@ if __name__ == '__main__':
 
         # network interface
         if not options.offline:
-            s = get_daemon(config, start_daemon=options.daemon)
+            s = get_daemon(config, False)
+            if s:
+                print_msg("Connected to daemon")
             network = NetworkProxy(s, config)
             network.start()
         else:
@@ -272,6 +276,7 @@ if __name__ == '__main__':
             network.start()
             if arg == 'status':
                 print_json({
+                    'path': network.config.path,
                     'server': network.get_parameters()[0],
                     'blockchain_height': network.get_local_height(),
                     'server_height': network.get_server_height(),
@@ -329,14 +334,11 @@ if __name__ == '__main__':
                 seed = getpass.getpass(prompt="seed:", stream=None) if options.concealed else raw_input("seed:")
                 if not Wallet.is_seed(seed):
                     sys.exit("Error: Invalid seed")
-                wallet = Wallet.from_seed(seed, storage)
-                wallet.add_seed(seed, password)
-                wallet.create_master_keys(password)
-                wallet.create_main_account(password)
+                wallet = Wallet.from_seed(seed, password, storage)
 
             if not options.offline:
-                s = get_daemon(config, True)
-                network = NetworkProxy(s,config)
+                s = get_daemon(config, False)
+                network = NetworkProxy(s, config)
                 network.start()
                 wallet.start_threads(network)
                 print_msg("Recovering wallet...")

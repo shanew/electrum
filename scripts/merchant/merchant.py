@@ -89,7 +89,7 @@ def on_wallet_update():
             if not tx: continue
             if wallet.verifier.get_confirmations(tx_hash) < requested_confs: continue
             for o in tx.outputs:
-                o_address, o_value = o
+                o_type, o_address, o_value = o
                 if o_address == addr:
                     value += o_value
 
@@ -122,7 +122,8 @@ def process_request(amount, confirmations, expires_in, password):
         return "incorrect parameters"
 
     account = wallet.default_account()
-    addr = account.get_address(0, num)
+    pubkeys = account.derive_pubkeys(0, num)
+    addr = account.pubkeys_to_address(pubkeys)
     num += 1
 
     out_queue.put( ('request', (addr, amount, confirmations, expires_in) ))
@@ -210,7 +211,7 @@ def db_thread():
             # add a new request to the table.
             addr, amount, confs, minutes = params
             sql = "INSERT INTO electrum_payments (address, amount, confirmations, received_at, expires_at, paid, processed)"\
-                + " VALUES ('%s', %f, %d, datetime('now'), datetime('now', '+%d Minutes'), NULL, NULL);"%(addr, amount, confs, minutes)
+                + " VALUES ('%s', %.8f, %d, datetime('now'), datetime('now', '+%d Minutes'), NULL, NULL);"%(addr, amount, confs, minutes)
             print sql
             cur.execute(sql)
 
@@ -257,8 +258,8 @@ if __name__ == '__main__':
 
     # start network
     c = electrum.SimpleConfig({'wallet_path':wallet_path})
-    daemon_socket = electrum.daemon.get_daemon(c,True)
-    network = electrum.NetworkProxy(daemon_socket,config)
+    daemon_socket = electrum.daemon.get_daemon(c, True)
+    network = electrum.NetworkProxy(daemon_socket, config)
     network.start()
 
     # wait until connected
@@ -266,7 +267,7 @@ if __name__ == '__main__':
         time.sleep(0.1)
 
     if not network.is_connected():
-        print_msg("daemon is not connected")
+        print "daemon is not connected"
         sys.exit(1)
 
     # create watching_only wallet
@@ -280,7 +281,6 @@ if __name__ == '__main__':
     wallet.synchronize = lambda: None # prevent address creation by the wallet
     wallet.start_threads(network)
     network.register_callback('updated', on_wallet_update)
-
 
     threading.Thread(target=db_thread, args=()).start()
     

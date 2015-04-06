@@ -23,7 +23,7 @@ import re
 import time
 from electrum.wallet import Wallet, WalletStorage
 import webbrowser
-import history_widget
+import history_widget_lite
 import receiving_widget
 from electrum import util
 import datetime
@@ -200,7 +200,7 @@ class MiniWindow(QDialog):
 
         self.send_button.setMaximumWidth(125)
 
-        self.history_list = history_widget.HistoryWidget()
+        self.history_list = history_widget_lite.HistoryWidget()
         self.history_list.setObjectName("history")
         self.history_list.hide()
         self.history_list.setAlternatingRowColors(True)
@@ -450,7 +450,7 @@ class MiniWindow(QDialog):
         self.history_list.empty()
 
         for item in tx_history[-10:]:
-            tx_hash, conf, is_mine, value, fee, balance, timestamp = item
+            tx_hash, conf, value, timestamp, balance = item
             label = self.actuator.g.wallet.get_label(tx_hash)[0]
             v_str = self.actuator.g.format_amount(value, True)
             self.history_list.append(label, v_str, age(timestamp))
@@ -862,7 +862,7 @@ class MiniDriver(QObject):
         self.window.update_completions(completions)
 
     def update_history(self):
-        tx_history = self.g.wallet.get_tx_history()
+        tx_history = self.g.wallet.get_history()
         self.window.update_history(tx_history)
 
 

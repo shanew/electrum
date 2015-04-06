@@ -8,6 +8,7 @@ import traceback
 
 import socks
 import socket
+import json
 
 import util
 from bitcoin import *
@@ -33,7 +34,8 @@ DEFAULT_SERVERS = {
     'us.electrum.be':DEFAULT_PORTS,
 }
 
-DISCONNECTED_RETRY_INTERVAL = 60
+NODES_RETRY_INTERVAL = 60
+SERVER_RETRY_INTERVAL = 10
 
 
 def parse_servers(result):
@@ -147,7 +149,7 @@ class Network(util.DaemonThread):
 
         self.disconnected_servers = set([])
 
-        self.recent_servers = self.config.get('recent_servers',[]) # successful connections
+        self.recent_servers = self.read_recent_servers()
         self.pending_servers = set()
 
         self.banner = ''
@@ -165,6 +167,28 @@ class Network(util.DaemonThread):
         self.connection_status = 'connecting'
         self.requests_queue = Queue.Queue()
         self.set_proxy(deserialize_proxy(self.config.get('proxy')))
+
+    def read_recent_servers(self):
+        if not self.config.path:
+            return []
+        path = os.path.join(self.config.path, "recent_servers")
+        try:
+            with open(path, "r") as f:
+                data = f.read()
+                return json.loads(data)
+        except:
+            return []
+
+    def save_recent_servers(self):
+        if not self.config.path:
+            return
+        path = os.path.join(self.config.path, "recent_servers")
+        s = json.dumps(self.recent_servers, indent=4, sort_keys=True)
+        try:
+            with open(path, "w") as f:
+                f.write(s)
+        except:
+            pass
 
     def get_server_height(self):
         return self.heights.get(self.default_server, 0)
@@ -236,7 +260,10 @@ class Network(util.DaemonThread):
         else:
             out = DEFAULT_SERVERS
             for s in self.recent_servers:
-                host, port, protocol = deserialize_server(s)
+                try:
+                    host, port, protocol = deserialize_server(s)
+                except:
+                    continue
                 if host not in out:
                     out[host] = { protocol:port }
         return out
@@ -282,15 +309,6 @@ class Network(util.DaemonThread):
 
 
     def set_parameters(self, host, port, protocol, proxy, auto_connect):
-        proxy_str = serialize_proxy(proxy)
-        server_str = serialize_server(host, port, protocol)
-        self.config.set_key('auto_cycle', auto_connect, True)
-        self.config.set_key("proxy", proxy_str, True)
-        self.config.set_key("server", server_str, True)
-        # abort if changes were not allowed by config
-        if self.config.get('server') != server_str or self.config.get('proxy') != proxy_str:
-            return
-
         if self.proxy != proxy or self.protocol != protocol:
             self.print_error('restarting network')
             for i in self.interfaces.values():
@@ -310,6 +328,7 @@ class Network(util.DaemonThread):
                 if self.server_is_lagging():
                     self.stop_interface()
         else:
+            server_str = serialize_server(host, port, protocol)
             self.set_server(server_str)
 
 
@@ -326,7 +345,6 @@ class Network(util.DaemonThread):
         server = interface.server
         self.print_error("switching to", server)
         self.interface = interface
-        self.config.set_key('server', server, False)
         self.default_server = server
         self.send_subscriptions()
         self.set_status('connected')
@@ -352,7 +370,6 @@ class Network(util.DaemonThread):
         self.set_status('connecting')
         # start interface
         self.default_server = server
-        self.config.set_key("server", server, True)
 
         if server in self.interfaces.keys():
             self.switch_to_interface( self.interfaces[server] )
@@ -367,8 +384,7 @@ class Network(util.DaemonThread):
             self.recent_servers.remove(s)
         self.recent_servers.insert(0,s)
         self.recent_servers = self.recent_servers[0:20]
-        self.config.set_key('recent_servers', self.recent_servers)
-
+        self.save_recent_servers()
 
     def add_interface(self, i):
         self.interfaces[i.server] = i
@@ -444,18 +460,20 @@ class Network(util.DaemonThread):
             time.sleep(0.1)
 
     def run(self):
-        disconnected_time = time.time()
+        server_retry_time = time.time()
+        nodes_retry_time = time.time()
         while self.is_running():
             try:
                 i, response = self.queue.get(timeout=0.1)
             except Queue.Empty:
+                now = time.time()
                 if len(self.interfaces) + len(self.pending_servers) < self.num_server:
                     self.start_random_interface()
                 if not self.interfaces:
-                    if time.time() - disconnected_time > DISCONNECTED_RETRY_INTERVAL:
+                    if now - nodes_retry_time > NODES_RETRY_INTERVAL:
                         self.print_error('network: retrying connections')
                         self.disconnected_servers = set([])
-                        disconnected_time = time.time()
+                        nodes_retry_time = now
                 if not self.interface.is_connected:
                     if self.config.get('auto_cycle'):
                         if self.interfaces:
@@ -464,9 +482,14 @@ class Network(util.DaemonThread):
                         if self.default_server in self.interfaces.keys():
                             self.switch_to_interface(self.interfaces[self.default_server])
                         else:
-                            if self.default_server not in self.disconnected_servers and self.default_server not in self.pending_servers:
-                                self.print_error("forcing reconnection")
-                                self.interface = self.start_interface(self.default_server)
+                            if self.default_server in self.disconnected_servers:
+                                if now - server_retry_time > SERVER_RETRY_INTERVAL:
+                                    self.disconnected_servers.remove(self.default_server)
+                                    server_retry_time = now
+                            else:
+                                if self.default_server not in self.pending_servers:
+                                    self.print_error("forcing reconnection")
+                                    self.interface = self.start_interface(self.default_server)
                 continue
 
             if response is not None:

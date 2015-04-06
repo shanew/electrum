@@ -107,17 +107,19 @@ class ElectrumGui:
         b = 0 
         self.history = []
 
-        for item in self.wallet.get_tx_history():
-            tx_hash, conf, is_mine, value, fee, balance, timestamp = item
+        for item in self.wallet.get_history():
+            tx_hash, conf, value, timestamp, balance = item
             if conf:
                 try:
-                    time_str = datetime.datetime.fromtimestamp( timestamp).isoformat(' ')[:-3]
+                    time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
                 except Exception:
                     time_str = "------"
             else:
                 time_str = 'pending'
 
             label, is_default_label = self.wallet.get_label(tx_hash)
+            if len(label) > 40:
+                label = label[0:37] + '...'
             self.history.append( format_str%( time_str, label, format_satoshis(value, whitespaces=True), format_satoshis(balance, whitespaces=True) ) )
 
 
