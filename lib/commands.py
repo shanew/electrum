@@ -107,7 +107,8 @@ register_command('verifymessage',        3,-1, False, False, False, 'Verifies a 
 
 register_command('encrypt',              2,-1, False, False, False, 'encrypt a message with pubkey','encrypt <pubkey> <message>')
 register_command('decrypt',              2,-1, False, True, True,   'decrypt a message encrypted with pubkey','decrypt <pubkey> <message>')
-register_command('getproof',             1, 1, True, False, False, 'get merkle proof', 'getproof <address>')
+register_command('getmerkle',            2, 2, True, False, False, 'Get Merkle branch of a transaction included in a block', 'getmerkle <txid> <height>')
+register_command('getproof',             1, 1, True, False, False, 'Get Merkle branch of an address in the UTXO set', 'getproof <address>')
 register_command('getutxoaddress',       2, 2, True, False, False, 'get the address of an unspent transaction output','getutxoaddress <txid> <pos>')
 register_command('sweep',                2, 3, True, False, False, 'Sweep a private key.', 'sweep privkey addr [fee]')
 register_command('make_seed',            3, 3, False, False, False, 'Create a seed.','options: --nbits --entropy --lang')
@@ -146,7 +147,7 @@ class Commands:
         return self.network.synchronous_get([ ('blockchain.address.get_history',[addr]) ])[0]
 
     def listunspent(self):
-        l = copy.deepcopy(self.wallet.get_unspent_coins())
+        l = copy.deepcopy(self.wallet.get_spendable_coins())
         for i in l: i["value"] = str(Decimal(i["value"])/100000000)
         return l
 
@@ -159,7 +160,7 @@ class Commands:
             return {'address':r[0] }
 
     def createrawtransaction(self, inputs, outputs):
-        coins = self.wallet.get_unspent_coins(None)
+        coins = self.wallet.get_spendable_coins(None)
         tx_inputs = []
         for i in inputs:
             prevout_hash = i['txid']
@@ -172,7 +173,7 @@ class Commands:
             else:
                 raise BaseException('Transaction output not in wallet', prevout_hash+":%d"%prevout_n)
         outputs = map(lambda x: ('address', x[0], int(1e8*x[1])), outputs.items())
-        tx = Transaction(tx_inputs, outputs)
+        tx = Transaction.from_io(tx_inputs, outputs)
         return tx
 
     def signtxwithkey(self, raw_tx, sec):
@@ -183,11 +184,13 @@ class Commands:
 
     def signtxwithwallet(self, raw_tx):
         tx = Transaction(raw_tx)
+        tx.deserialize()
         self.wallet.sign_transaction(tx, self.password)
         return tx
 
     def decoderawtransaction(self, raw):
         tx = Transaction(raw)
+        tx.deserialize()
         return {'inputs':tx.inputs, 'outputs':tx.outputs}
 
     def sendrawtransaction(self, raw):
@@ -231,12 +234,14 @@ class Commands:
 
     def getbalance(self, account= None):
         if account is None:
-            c, u = self.wallet.get_balance()
+            c, u, x = self.wallet.get_balance()
         else:
-            c, u = self.wallet.get_account_balance(account)
-
-        out = { "confirmed": str(Decimal(c)/100000000) }
-        if u: out["unconfirmed"] = str(Decimal(u)/100000000)
+            c, u, x = self.wallet.get_account_balance(account)
+        out = {"confirmed": str(Decimal(c)/100000000)}
+        if u:
+            out["unconfirmed"] = str(Decimal(u)/100000000)
+        if x:
+            out["unmatured"] = str(Decimal(x)/100000000)
         return out
 
     def getaddressbalance(self, addr):
@@ -251,6 +256,9 @@ class Commands:
         for i,s in p:
             out.append(i)
         return out
+
+    def getmerkle(self, txid, height):
+        return self.network.synchronous_get([ ('blockchain.transaction.get_merkle', [txid, int(height)]) ])[0]
 
     def getservers(self):
         while not self.network.is_up_to_date():
@@ -343,7 +351,7 @@ class Commands:
         balance = 0
         out = []
         for item in self.wallet.get_history():
-            tx_hash, conf, is_mine, value, fee, balance, timestamp = item
+            tx_hash, conf, value, timestamp, balance = item
             try:
                 time_str = datetime.datetime.fromtimestamp( timestamp).isoformat(' ')[:-3]
             except Exception:

@@ -36,7 +36,7 @@ import PyQt4.QtCore as QtCore
 
 from electrum.i18n import _, set_language
 from electrum.util import print_error, print_msg
-from electrum.plugins import run_hook
+from electrum.plugins import run_hook, always_hook
 from electrum import WalletStorage, Wallet
 from electrum.bitcoin import MIN_RELAY_TX_FEE
 
@@ -73,6 +73,8 @@ class ElectrumGui:
         if app is None:
             self.app = QApplication(sys.argv)
         self.app.installEventFilter(self.efilter)
+        # let plugins know that we are using the qt gui
+        always_hook('init_qt_app', self.app)
 
 
     def build_tray_menu(self):
@@ -158,8 +160,12 @@ class ElectrumGui:
                 return
         wizard = installwizard.InstallWizard(self.config, self.network, storage)
         wizard.show()
+        if action == 'new':
+            action, wallet_type = wizard.restore_or_create()
+        else:
+            wallet_type = None
         try:
-            wallet = wizard.run(action)
+            wallet = wizard.run(action, wallet_type)
         except BaseException as e:
             traceback.print_exc(file=sys.stdout)
             QMessageBox.information(None, _('Error'), str(e), _('OK'))
@@ -173,7 +179,7 @@ class ElectrumGui:
             if os.path.exists(last_wallet):
                 self.config.read_only_options['default_wallet_path'] = last_wallet
         try:
-            storage = WalletStorage(self.config)
+            storage = WalletStorage(self.config.get_wallet_path())
         except BaseException as e:
             QMessageBox.warning(None, _('Warning'), str(e), _('OK'))
             self.config.set_key('gui_last_wallet', None)
@@ -212,6 +218,11 @@ class ElectrumGui:
         #lite window
         self.init_lite()
 
+        # plugins interact with main window
+        run_hook('init_qt', self)
+
+        w.load_wallet(wallet)
+
         # initial configuration
         if self.config.get('hide_gui') is True and self.tray.isVisible():
             self.main_window.hide()
@@ -222,11 +233,6 @@ class ElectrumGui:
             else:
                 self.go_full()
 
-        # plugins that need to change the GUI do it here
-        run_hook('init_qt', self)
-
-        w.load_wallet(wallet)
-
         s = Timer()
         s.start()
 
@@ -235,7 +241,6 @@ class ElectrumGui:
             self.set_url(url)
 
         w.connect_slots(s)
-        w.update_wallet()
 
         signal.signal(signal.SIGINT, lambda *args: self.app.quit())
         self.app.exec_()

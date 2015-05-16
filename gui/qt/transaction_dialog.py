@@ -58,7 +58,9 @@ class TxDialog(QDialog):
         self.setLayout(vbox)
 
         vbox.addWidget(QLabel(_("Transaction ID:")))
-        self.tx_hash_e  = QLineEdit()
+        self.tx_hash_e  = ButtonsLineEdit()
+        qr_show = lambda: self.parent.show_qrcode(str(self.tx_hash_e.text()), 'Transaction ID')
+        self.tx_hash_e.addButton(":icons/qrcode.png", qr_show, _("Show as QR code"))
         self.tx_hash_e.setReadOnly(True)
         vbox.addWidget(self.tx_hash_e)
         self.status_label = QLabel()
@@ -93,7 +95,9 @@ class TxDialog(QDialog):
         b.setIcon(QIcon(":icons/qrcode.png"))
         b.clicked.connect(self.show_qr)
 
-        self.buttons = [self.qr_button, self.sign_button, self.broadcast_button, self.save_button, self.cancel_button]
+        self.copy_button = CopyButton(lambda: str(self.tx), self.parent.app)
+
+        self.buttons = [self.copy_button, self.qr_button, self.sign_button, self.broadcast_button, self.save_button, self.cancel_button]
         run_hook('transaction_dialog', self)
 
         vbox.addLayout(Buttons(*self.buttons))
@@ -145,7 +149,7 @@ class TxDialog(QDialog):
             status = _("Signed")
 
             if tx_hash in self.wallet.transactions.keys():
-                conf, timestamp = self.wallet.verifier.get_confirmations(tx_hash)
+                conf, timestamp = self.wallet.get_confirmations(tx_hash)
                 if timestamp:
                     time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
                 else:
@@ -174,6 +178,7 @@ class TxDialog(QDialog):
 
         # if we are not synchronized, we cannot tell
         if self.parent.network is None or not self.parent.network.is_running() or not self.parent.network.is_connected():
+            self.broadcast_button.hide()  # cannot broadcast when offline
             return
         if not self.wallet.up_to_date:
             return
@@ -225,6 +230,8 @@ class TxDialog(QDialog):
                     _addr = self.wallet.find_pay_to_pubkey_address(prevout_hash, prevout_n)
                     if _addr:
                         addr = _addr
+                if addr is None:
+                    addr = _('unknown')
                 cursor.insertText(addr, own if self.wallet.is_mine(addr) else ext)
             cursor.insertBlock()
 

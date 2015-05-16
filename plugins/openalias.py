@@ -85,6 +85,8 @@ class Plugin(BasePlugin):
             return
         if self.win.payto_e.is_multiline():  # only supports single line entries atm
             return
+        if self.win.payto_e.is_pr:
+            return
 
         url = str(self.win.payto_e.toPlainText())
         url = url.replace('@', '.')  # support email-style addresses, per the OA standard
@@ -108,7 +110,7 @@ class Plugin(BasePlugin):
         self.win.previous_payto_e = new_url
 
         if self.config.get('openalias_autoadd') == 'checked':
-            self.win.wallet.add_contact(url, name)
+            self.win.contacts[url] = ('openalias', name)
             self.win.update_contacts_tab()
 
         self.win.payto_e.setFrozen(True)
@@ -130,6 +132,8 @@ class Plugin(BasePlugin):
 
         if self.win.payto_e.is_multiline():  # only supports single line entries atm
             return False
+        if self.win.payto_e.is_pr:
+            return
         payto_e = str(self.win.payto_e.toPlainText())
         regex = re.compile(r'^([^\s]+) <([A-Za-z0-9]+)>')  # only do that for converted addresses
         try:

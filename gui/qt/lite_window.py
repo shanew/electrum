@@ -850,15 +850,12 @@ class MiniDriver(QObject):
         self.window.activate()
 
     def update_balance(self):
-        conf_balance, unconf_balance = self.g.wallet.get_balance()
-        balance = D(conf_balance + unconf_balance)
+        conf_balance, unconf_balance, x = self.g.wallet.get_balance()
+        balance = D(conf_balance + unconf_balance + x)
         self.window.set_balances(balance)
 
     def update_completions(self):
-        completions = []
-        for addr, label in self.g.wallet.labels.items():
-            if addr in self.g.wallet.addressbook:
-                completions.append("%s <%s>" % (label, addr))
+        completions = [self.g.get_contact_payto(key) for key in self.g.contacts.keys()]
         self.window.update_completions(completions)
 
     def update_history(self):

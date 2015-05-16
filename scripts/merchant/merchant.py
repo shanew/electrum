@@ -87,7 +87,7 @@ def on_wallet_update():
         for tx_hash, tx_height in h:
             tx = wallet.transactions.get(tx_hash)
             if not tx: continue
-            if wallet.verifier.get_confirmations(tx_hash) < requested_confs: continue
+            if wallet.get_confirmations(tx_hash)[0] < requested_confs: continue
             for o in tx.outputs:
                 o_type, o_address, o_value = o
                 if o_address == addr:
@@ -134,7 +134,6 @@ def process_request(amount, confirmations, expires_in, password):
 def do_dump(password):
     if password != my_password:
         return "wrong password"
-
     conn = sqlite3.connect(database);
     cur = conn.cursor()
     # read pending requests from table
@@ -144,6 +143,8 @@ def do_dump(password):
 
 
 def getrequest(oid, password):
+    if password != my_password:
+        return "wrong password"
     oid = int(oid)
     conn = sqlite3.connect(database);
     cur = conn.cursor()

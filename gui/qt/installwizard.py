@@ -15,7 +15,7 @@ from amountedit import AmountEdit
 
 import sys
 import threading
-from electrum.plugins import run_hook
+from electrum.plugins import always_hook
 from electrum.mnemonic import prepare_seed
 
 MSG_ENTER_ANYTHING    = _("Please enter a wallet seed, a master public key, a list of Bitcoin addresses, or a list of private keys")
@@ -89,8 +89,8 @@ class InstallWizard(QDialog):
                 button.setChecked(True)
 
         vbox.addStretch(1)
-        vbox.addLayout(Buttons(CancelButton(self), OkButton(self, _('Next'))))
         self.set_layout(vbox)
+        vbox.addLayout(Buttons(CancelButton(self), OkButton(self, _('Next'))))
         self.show()
         self.raise_()
 
@@ -314,13 +314,9 @@ class InstallWizard(QDialog):
         return run_password_dialog(self, None, self)[2]
 
 
+    def run(self, action, wallet_type):
 
-
-
-    def run(self, action):
-
-        if action == 'new':
-            action, wallet_type = self.restore_or_create()
+        if action in ['create', 'restore']:
             if wallet_type == 'multisig':
                 wallet_type = self.choice(_("Multi Signature Wallet"), 'Select wallet type', [('2of2', _("2 of 2")),('2of3',_("2 of 3"))])
                 if not wallet_type:
@@ -332,7 +328,6 @@ class InstallWizard(QDialog):
                     return
             elif wallet_type == 'twofactor':
                 wallet_type = '2fa'
-
             if action == 'create':
                 self.storage.put('wallet_type', wallet_type, False)
 
@@ -354,7 +349,8 @@ class InstallWizard(QDialog):
             util.print_error("installwizard:", wallet, action)
 
             if action == 'create_seed':
-                seed = wallet.make_seed()
+                lang = self.config.get('language')
+                seed = wallet.make_seed(lang)
                 if not self.show_seed(seed, None):
                     return
                 if not self.verify_seed(seed, None):
@@ -385,7 +381,7 @@ class InstallWizard(QDialog):
                 self.waiting_dialog(wallet.synchronize)
 
             else:
-                f = run_hook('get_wizard_action', self, wallet, action)
+                f = always_hook('get_wizard_action', self, wallet, action)
                 if not f:
                     raise BaseException('unknown wizard action', action)
                 r = f(wallet, self)
@@ -452,7 +448,7 @@ class InstallWizard(QDialog):
 
             else:
                 self.storage.put('wallet_type', t)
-                wallet = run_hook('installwizard_restore', self, self.storage)
+                wallet = always_hook('installwizard_restore', self, self.storage)
                 if not wallet:
                     return
 

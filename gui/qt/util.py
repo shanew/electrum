@@ -73,8 +73,9 @@ class EnterButton(QPushButton):
 
 
 class ThreadedButton(QPushButton):
-    def __init__(self, text, func, on_success=None):
+    def __init__(self, text, func, on_success=None, before=None):
         QPushButton.__init__(self, text)
+        self.before = before
         self.run_task = func
         self.on_success = on_success
         self.clicked.connect(self.do_exec)
@@ -95,15 +96,42 @@ class ThreadedButton(QPushButton):
         try:
             self.result = self.run_task()
         except BaseException as e:
+            traceback.print_exc(file=sys.stdout)
             self.error = str(e.message)
             self.emit(SIGNAL('error'))
             return
         self.emit(SIGNAL('done'))
 
     def do_exec(self):
+        if self.before:
+            self.before()
         t = threading.Thread(target=self.do_func)
         t.setDaemon(True)
         t.start()
+
+
+class HelpLabel(QLabel):
+
+    def __init__(self, text, help_text):
+        QLabel.__init__(self, text)
+        self.help_text = help_text
+        self.app = QCoreApplication.instance()
+        self.font = QFont()
+
+    def mouseReleaseEvent(self, x):
+        QMessageBox.information(self, 'Help', self.help_text, 'OK')
+
+    def enterEvent(self, event):
+        self.font.setUnderline(True)
+        self.setFont(self.font)
+        self.app.setOverrideCursor(QCursor(Qt.PointingHandCursor))
+        return QLabel.enterEvent(self, event)
+
+    def leaveEvent(self, event):
+        self.font.setUnderline(False)
+        self.setFont(self.font)
+        self.app.setOverrideCursor(QCursor(Qt.ArrowCursor))
+        return QLabel.leaveEvent(self, event)
 
 
 class HelpButton(QPushButton):
@@ -112,17 +140,10 @@ class HelpButton(QPushButton):
         self.help_text = text
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedWidth(20)
-        self.alt = None
         self.clicked.connect(self.onclick)
 
-    def set_alt(self, func):
-        self.alt = func
-
     def onclick(self):
-        if self.alt:
-            apply(self.alt)
-        else:
-            QMessageBox.information(self, 'Help', self.help_text, 'OK')
+        QMessageBox.information(self, 'Help', self.help_text, 'OK')
 
 class Buttons(QHBoxLayout):
     def __init__(self, *buttons):
@@ -138,9 +159,9 @@ class CloseButton(QPushButton):
         self.setDefault(True)
 
 class CopyButton(QPushButton):
-    def __init__(self, text, app):
+    def __init__(self, text_getter, app):
         QPushButton.__init__(self, _("Copy"))
-        self.clicked.connect(lambda: app.clipboard().setText(str(text.toPlainText())))
+        self.clicked.connect(lambda: app.clipboard().setText(text_getter()))
 
 class OkButton(QPushButton):
     def __init__(self, dialog, label=None):
@@ -179,7 +200,7 @@ def text_dialog(parent, title, label, ok_label, default=None):
     l = QVBoxLayout()
     dialog.setLayout(l)
     l.addWidget(QLabel(label))
-    txt = ScanQRTextEdit(parent)
+    txt = ScanQRTextEdit()
     if default:
         txt.setText(default)
     l.addWidget(txt)
@@ -253,7 +274,7 @@ def filename_field(parent, config, defaultname, select_msg):
 
 class MyTreeWidget(QTreeWidget):
 
-    def __init__(self, parent, create_menu, headers, column_width):
+    def __init__(self, parent, create_menu, headers, stretch_column=None):
         QTreeWidget.__init__(self, parent)
         self.parent = parent
         self.setColumnCount(len(headers))
@@ -267,16 +288,13 @@ class MyTreeWidget(QTreeWidget):
         self.insertChild = self.insertTopLevelItem
         # editable column
         self.is_edit = False
-        self.edit_column = None
+        self.edit_column = stretch_column
         self.itemDoubleClicked.connect(self.edit_label)
         self.itemChanged.connect(self.label_changed)
-        # set column width
-        for i, width in enumerate(column_width):
-            if width is None:
-                self.header().setResizeMode(i, QHeaderView.Stretch)
-                self.edit_column = i
-            else:
-                self.setColumnWidth(i, width)
+        # stretch
+        for i in range(len(headers)):
+            self.header().setResizeMode(i, QHeaderView.Stretch if i == stretch_column else QHeaderView.ResizeToContents)
+        self.setSortingEnabled(True)
 
     def on_activated(self, item):
         if not item:
@@ -315,13 +333,81 @@ class MyTreeWidget(QTreeWidget):
         if text:
             item.setForeground(self.edit_column, QBrush(QColor('black')))
         else:
-            text = self.wallet.get_default_label(key)
+            text = self.parent.wallet.get_default_label(key)
             item.setText(self.edit_column, text)
             item.setForeground(self.edit_column, QBrush(QColor('gray')))
         self.is_edit = False
         if changed:
             self.parent.update_history_tab()
             self.parent.update_completions()
+
+    def get_leaves(self, root):
+        child_count = root.childCount()
+        if child_count == 0:
+            yield root
+        for i in range(child_count):
+            item = root.child(i)
+            for x in self.get_leaves(item):
+                yield x
+
+    def filter(self, p, columns):
+        p = unicode(p).lower()
+        for item in self.get_leaves(self.invisibleRootItem()):
+            item.setHidden(all([unicode(item.text(column)).lower().find(p) == -1
+                                for column in columns]))
+
+
+class ButtonsWidget(QWidget):
+
+    def __init__(self):
+        super(QWidget, self).__init__()
+        self.buttons = []
+
+    def resizeButtons(self):
+        frameWidth = self.style().pixelMetric(QStyle.PM_DefaultFrameWidth)
+        x = self.rect().right() - frameWidth
+        y = self.rect().bottom() - frameWidth
+        for button in self.buttons:
+            sz = button.sizeHint()
+            x -= sz.width()
+            button.move(x, y - sz.height())
+
+    def addButton(self, icon_name, on_click, tooltip):
+        button = QToolButton(self)
+        button.setIcon(QIcon(icon_name))
+        button.setStyleSheet("QToolButton { border: none; hover {border: 1px} pressed {border: 1px} padding: 0px; }")
+        button.setVisible(True)
+        button.setToolTip(tooltip)
+        button.clicked.connect(on_click)
+        self.buttons.append(button)
+        return button
+
+    def addCopyButton(self, app):
+        self.app = app
+        f = lambda: self.app.clipboard().setText(str(self.text()))
+        self.addButton(":icons/copy.png", f, _("Copy to Clipboard"))
+
+class ButtonsLineEdit(QLineEdit, ButtonsWidget):
+    def __init__(self, text=None):
+        QLineEdit.__init__(self, text)
+        self.buttons = []
+
+    def resizeEvent(self, e):
+        o = QLineEdit.resizeEvent(self, e)
+        self.resizeButtons()
+        return o
+
+class ButtonsTextEdit(QPlainTextEdit, ButtonsWidget):
+    def __init__(self, text=None):
+        QPlainTextEdit.__init__(self, text)
+        self.setText = self.setPlainText
+        self.text = self.toPlainText
+        self.buttons = []
+
+    def resizeEvent(self, e):
+        o = QPlainTextEdit.resizeEvent(self, e)
+        self.resizeButtons()
+        return o
 
 
 if __name__ == "__main__":

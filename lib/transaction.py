@@ -704,7 +704,6 @@ class Transaction:
         return out
 
     def sign(self, keypairs):
-        print_error("tx.sign(), keypairs:", keypairs)
         for i, txin in enumerate(self.inputs):
             signatures = filter(None, txin['signatures'])
             num = txin['num_sig']
@@ -770,7 +769,7 @@ class Transaction:
         return out
 
 
-    def requires_fee(self, verifier):
+    def requires_fee(self, wallet):
         # see https://en.bitcoin.it/wiki/Transaction_fees
         #
         # size must be smaller than 1 kbyte for free tx
@@ -785,7 +784,7 @@ class Transaction:
         threshold = 57600000
         weight = 0
         for txin in self.inputs:
-            age = verifier.get_confirmations(txin["prevout_hash"])[0]
+            age = wallet.get_confirmations(txin["prevout_hash"])[0]
             weight += txin["value"] * age
         priority = weight / size
         print_error(priority, threshold)
