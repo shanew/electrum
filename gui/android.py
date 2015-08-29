@@ -23,7 +23,7 @@ from __future__ import absolute_import
 import android
 
 from electrum import SimpleConfig, Wallet, WalletStorage, format_satoshis
-from electrum.bitcoin import is_address
+from electrum.bitcoin import is_address, COIN
 from electrum import util
 from decimal import Decimal
 import datetime, re
@@ -444,7 +444,7 @@ def pay_to(recipient, amount, label):
     droid.dialogShow()
 
     try:
-        tx = wallet.mktx([('address', recipient, amount)], password)
+        tx = wallet.mktx([('address', recipient, amount)], password, config)
     except Exception as e:
         modal_dialog('error', e.message)
         droid.dialogDismiss()
@@ -475,7 +475,8 @@ def make_new_contact():
         data = str(r['extras']['SCAN_RESULT']).strip()
         if data:
             if re.match('^bitcoin:', data):
-                address, _, _, _, _ = util.parse_URI(data)
+                out = util.parse_URI(data)
+                address = out.get('address')
             elif is_address(data):
                 address = data
             else:
@@ -585,7 +586,7 @@ def payto_loop():
                     continue
 
                 try:
-                    amount = int( 100000000 * Decimal(amount) )
+                    amount = int(COIN * Decimal(amount))
                 except Exception:
                     modal_dialog('Error','Invalid amount')
                     continue
@@ -606,10 +607,13 @@ def payto_loop():
                     if data:
                         print "data", data
                         if re.match('^bitcoin:', data):
-                            payto, amount, label, message, _ = util.parse_URI(data)
+                            rr = util.parse_URI(data)
+                            amount = rr.get('amount')
+                            address = rr.get('address')
+                            message = rr.get('message', '')
                             if amount:
-                                amount = str(amount/100000000)
-                            droid.fullSetProperty("recipient", "text", payto)
+                                amount = str(Decimal(amount)/COIN)
+                            droid.fullSetProperty("recipient", "text", address)
                             droid.fullSetProperty("amount", "text", amount)
                             droid.fullSetProperty("message", "text", message)
                         elif is_address(data):
@@ -662,7 +666,7 @@ def receive_loop():
         elif event["name"]=="amount":
             amount = modal_input('Amount', 'Amount you want to receive (in BTC). ', format_satoshis(receive_amount) if receive_amount else None, "numberDecimal")
             if amount is not None:
-                receive_amount = int(100000000 * Decimal(amount)) if amount else None
+                receive_amount = int(COIN * Decimal(amount)) if amount else None
                 out = 'receive'
 
         elif event["name"]=="message":
@@ -770,7 +774,7 @@ def settings_loop():
 
     def set_listview():
         host, port, p, proxy_config, auto_connect = network.get_parameters()
-        fee = str( Decimal( wallet.fee_per_kb)/100000000 )
+        fee = str(Decimal(wallet.fee_per_kb(config)) / COIN)
         is_encrypted = 'yes' if wallet.use_encryption else 'no'
         protocol = protocol_name(p)
         droid.fullShow(settings_layout)
@@ -817,14 +821,16 @@ def settings_loop():
                     network_changed = True
 
             elif pos == "3": #fee
-                fee = modal_input('Transaction fee', 'The fee will be this amount multiplied by the number of inputs in your transaction. ',
-                                  str(Decimal(wallet.fee_per_kb)/100000000 ), "numberDecimal")
+                fee = modal_input(
+                    'Transaction fee',
+                    'The fee will be this amount multiplied by the number of inputs in your transaction. ',
+                    str(Decimal(wallet.fee_per_kb(config)) / COIN), "numberDecimal")
                 if fee:
                     try:
-                        fee = int( 100000000 * Decimal(fee) )
+                        fee = int(COIN * Decimal(fee))
                     except Exception:
                         modal_dialog('error','invalid fee value')
-                    wallet.set_fee(fee)
+                    config.set_key('fee_per_kb', fee)
                     set_listview()
 
             elif pos == "4":
@@ -894,12 +900,14 @@ menu_commands = ["send", "receive", "settings", "contacts", "main"]
 wallet = None
 network = None
 contacts = None
+config = None
 
 class ElectrumGui:
 
-    def __init__(self, config, _network):
-        global wallet, network, contacts
+    def __init__(self, _config, _network):
+        global wallet, network, contacts, config
         network = _network
+        config = _config
         network.register_callback('updated', update_callback)
         network.register_callback('connected', update_callback)
         network.register_callback('disconnected', update_callback)

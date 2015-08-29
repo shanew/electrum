@@ -16,22 +16,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-import socket
-import time
 import sys
-import os
-import threading
 import traceback
-import json
+import threading
 import Queue
 
 import util
-from network import Network
-from util import print_error, print_stderr, parse_json
+from network import Network, serialize_proxy, serialize_server
 from simple_config import SimpleConfig
-from daemon import NetworkServer
-from network import serialize_proxy, serialize_server
-
 
 
 class NetworkProxy(util.DaemonThread):
@@ -47,38 +39,44 @@ class NetworkProxy(util.DaemonThread):
         self.subscriptions = {}
         self.debug = False
         self.lock = threading.Lock()
-        self.pending_transactions_for_notifications = []
         self.callbacks = {}
 
         if socket:
             self.pipe = util.SocketPipe(socket)
             self.network = None
         else:
-            self.network = Network(config)
-            self.pipe = util.QueuePipe(send_queue=self.network.requests_queue)
-            self.network.start(self.pipe.get_queue)
-            for key in ['status','banner','updated','servers','interfaces']:
+            self.pipe = util.QueuePipe()
+            self.network = Network(self.pipe, config)
+            self.network.start()
+            for key in ['fee','status','banner','updated','servers','interfaces']:
                 value = self.network.get_status_value(key)
                 self.pipe.get_queue.put({'method':'network.status', 'params':[key, value]})
 
         # status variables
-        self.status = 'connecting'
+        self.status = 'unknown'
         self.servers = {}
         self.banner = ''
         self.blockchain_height = 0
         self.server_height = 0
         self.interfaces = []
+        # value returned by estimatefee
+        self.fee = None
 
 
     def run(self):
         while self.is_running():
+            self.run_jobs()    # Synchronizer and Verifier
             try:
                 response = self.pipe.get()
             except util.timeout:
                 continue
             if response is None:
                 break
-            self.process(response)
+            # Protect against ill-formed or malicious server responses
+            try:
+                self.process(response)
+            except:
+                traceback.print_exc(file=sys.stderr)
         self.trigger_callback('stop')
         if self.network:
             self.network.stop()
@@ -86,7 +84,7 @@ class NetworkProxy(util.DaemonThread):
 
     def process(self, response):
         if self.debug:
-            print_error("<--", response)
+            self.print_error("<--", response)
 
         if response.get('method') == 'network.status':
             key, value = response.get('params')
@@ -94,13 +92,18 @@ class NetworkProxy(util.DaemonThread):
                 self.status = value
             elif key == 'banner':
                 self.banner = value
+            elif key == 'fee':
+                self.fee = value
             elif key == 'updated':
                 self.blockchain_height, self.server_height = value
             elif key == 'servers':
                 self.servers = value
             elif key == 'interfaces':
                 self.interfaces = value
-            self.trigger_callback(key)
+            if key in ['status', 'updated']:
+                self.trigger_callback(key)
+            else:
+                self.trigger_callback(key, (value,))
             return
 
         msg_id = response.get('id')
@@ -118,11 +121,12 @@ class NetworkProxy(util.DaemonThread):
                         callback = k
                         break
                 else:
-                    print_error( "received unexpected notification", method, params)
+                    self.print_error("received unexpected notification",
+                                     method, params)
                     return
 
-
-        r = {'method':method, 'params':params, 'result':result, 'id':msg_id, 'error':error}
+        r = {'method':method, 'params':params, 'result':result,
+             'id':msg_id, 'error':error}
         callback(r)
 
 
@@ -153,7 +157,7 @@ class NetworkProxy(util.DaemonThread):
                 ids.append(self.message_id)
                 requests.append(request)
                 if self.debug:
-                    print_error("-->", request)
+                    self.print_error("-->", request)
                 self.message_id += 1
 
             self.pipe.send_all(requests)
@@ -170,7 +174,7 @@ class NetworkProxy(util.DaemonThread):
             _id = r.get('id')
             ids.remove(_id)
             if r.get('error'):
-                return BaseException(r.get('error'))
+                raise BaseException(r.get('error'))
             result = r.get('result')
             res[_id] = r.get('result')
         out = []
@@ -184,9 +188,6 @@ class NetworkProxy(util.DaemonThread):
 
     def get_interfaces(self):
         return self.interfaces
-
-    def get_header(self, height):
-        return self.synchronous_get([('network.get_header', [height])])[0]
 
     def get_local_height(self):
         return self.blockchain_height
@@ -209,8 +210,8 @@ class NetworkProxy(util.DaemonThread):
     def set_parameters(self, host, port, protocol, proxy, auto_connect):
         proxy_str = serialize_proxy(proxy)
         server_str = serialize_server(host, port, protocol)
-        self.config.set_key('auto_cycle', auto_connect, True)
-        self.config.set_key("proxy", proxy_str, True)
+        self.config.set_key('auto_connect', auto_connect, False)
+        self.config.set_key("proxy", proxy_str, False)
         self.config.set_key("server", server_str, True)
         # abort if changes were not allowed by config
         if self.config.get('server') != server_str or self.config.get('proxy') != proxy_str:
@@ -227,8 +228,8 @@ class NetworkProxy(util.DaemonThread):
                 self.callbacks[event] = []
             self.callbacks[event].append(callback)
 
-    def trigger_callback(self, event):
+    def trigger_callback(self, event, params=()):
         with self.lock:
             callbacks = self.callbacks.get(event,[])[:]
         if callbacks:
-            [callback() for callback in callbacks]
+            [callback(*params) for callback in callbacks]

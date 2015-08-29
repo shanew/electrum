@@ -102,6 +102,7 @@ filenames = {
     'es':'spanish.txt',
     'ja':'japanese.txt',
     'pt':'portuguese.txt',
+    'zh':'chinese_simplified.txt'
 }
 
 
